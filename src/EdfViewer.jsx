@@ -305,20 +305,30 @@ export default function EdfViewer() {
     if (overrideIndex && typeof overrideIndex === 'object' && overrideIndex.target) overrideIndex = undefined
     const idx = (overrideIndex !== undefined && overrideIndex !== null) ? overrideIndex : epochIndex
     if (!data) return
-    // merge canvases vertically
+    // merge canvases vertically and scale to fixed output size 1080x1920
     const widths = canvasesRef.current.map(c => c?.width || 0)
     const heights = canvasesRef.current.map(c => c?.height || 0)
-    const w = Math.max(...widths, 800)
-    const h = heights.reduce((a,b)=>a+b,0)
+    const origW = Math.max(...widths, 800)
+    const origH = Math.max(heights.reduce((a,b)=>a+b,0), 1)
+    const OUT_W = 1080
+    const OUT_H = 1920
     const out = document.createElement('canvas')
-    out.width = w
-    out.height = h
+    out.width = OUT_W
+    out.height = OUT_H
     const ctx = out.getContext('2d')
     let y = 0
+    const scaleY = OUT_H / origH
+    const scaleX = OUT_W / origW
     canvasesRef.current.forEach(c => {
       if (!c) return
-      ctx.drawImage(c, 0, y, w, c.height)
-      y += c.height
+      const srcW = c.width
+      const srcH = c.height
+      const destX = 0
+      const destY = Math.round(y * scaleY)
+      const destW = Math.round(srcW * scaleX)
+      const destH = Math.round(srcH * scaleY)
+      ctx.drawImage(c, 0, 0, srcW, srcH, destX, destY, destW, destH)
+      y += srcH
     })
     // get blob promise
     out.toBlob(async (blob) => {
@@ -412,7 +422,7 @@ export default function EdfViewer() {
                   <div style={{width:160}}>{name} ({pixels}px)</div>
                   <canvas
                     ref={el => { canvasesRef.current[rowIdx] = el }}
-                    width={800}
+                    width={1080}
                     height={pixels}
                     style={{border:'1px solid #333', background:'#111'}}
                   />
