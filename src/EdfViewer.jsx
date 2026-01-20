@@ -21,7 +21,8 @@ function mapChannelName(label) {
   if (/ABDO|ABD|ABDOMEN/.test(s)) return 'Abdomen'
   // Only map explicit SpO2 / saturation labels to `Saturation` (exclude OxStatus)
   if (/\bSPO2\b/.test(s) || /SATUR/.test(s)) return 'Saturation'
-  if (/AUDIO|PTAFVOL|VOLUME/.test(s)) return 'Audio Volume'
+  // Treat audio/volume channels as snore sensor
+  if (/AUDIO|PTAFVOL|VOLUME/.test(s)) return 'Snore'
   if (/X ?AXIS|ACCEL|ACCELEROMETER|XAXIS/.test(s)) return 'X Axis'
   if (/Y ?AXIS|YAXIS/.test(s)) return 'Y Axis'
   if (/Z ?AXIS|ZAXIS/.test(s)) return 'Z Axis'
@@ -53,7 +54,7 @@ function mapChannelName(label) {
         case 'THORAX': return 'Thorax'
         case 'ABDOMEN': return 'Abdomen'
         case 'SNORE': return 'Snore'
-        case 'AUDIOVOLUME': return 'Audio Volume'
+        case 'AUDIOVOLUME': return 'Snore'
         case 'LEFTLEG': return 'Left Leg'
         case 'RIGHTLEG': return 'Right Leg'
         case 'SATURATION': return 'Saturation'
@@ -231,7 +232,11 @@ export default function EdfViewer() {
         if (!name) {
           ch = { name: '', samples: [], sampleRate: 100 }
         } else {
-          const mappedIdx = data.channels.findIndex(c => c.name === name || (c.rawLabel && c.rawLabel.toUpperCase().includes('SPO2') && name.startsWith('Saturation')))
+          let mappedIdx = data.channels.findIndex(c => c.name === name || (c.rawLabel && c.rawLabel.toUpperCase().includes('SPO2') && name.startsWith('Saturation')))
+          if ((mappedIdx == null || mappedIdx < 0) && name === 'Audio Volume') {
+            // prefer channels already mapped to `Snore`, otherwise raw labels containing AUDIO/VOLUME
+            mappedIdx = data.channels.findIndex(c => c.name === 'Snore' || (c.rawLabel && /AUDIO|PTAFVOL|VOLUME/.test(c.rawLabel.toUpperCase())))
+          }
           ch = (mappedIdx != null && mappedIdx >= 0) ? data.channels[mappedIdx] : (data.channels[rowIdx] || null)
         }
         if (!ch) return
@@ -317,7 +322,7 @@ export default function EdfViewer() {
     })
     // get blob promise
     out.toBlob(async (blob) => {
-      const filename = `edf_epoch_${idx}.png`
+      const filename = `edf_epoch_${idx + 1}.png`
       // if user selected a directory and File System Access API available, write directly
       const dirHandle = dirHandleRef.current
       if (dirHandle && typeof dirHandle.getFileHandle === 'function') {
