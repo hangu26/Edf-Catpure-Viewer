@@ -125,6 +125,41 @@ function drawWave(canvas, samples, sampleRate, epochStartSample, epochSamples, y
   ctx.stroke()
 }
 
+// Draw a wave directly into an existing 2D context rect (used for high-res programmatic captures)
+function drawWaveIntoCtx(ctx, destX, destY, destW, destH, samples, sampleRate, epochStart, epochSamples, yRange=null) {
+  const slice = (samples && samples.slice) ? samples.slice(epochStart, epochStart + epochSamples) : []
+  ctx.save()
+  ctx.fillStyle = '#000'
+  ctx.fillRect(destX, destY, destW, destH)
+  ctx.strokeStyle = '#fff'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  if (yRange && yRange.length === 2) {
+    const yMin = yRange[0]
+    const yMax = yRange[1]
+    for (let i = 0; i < slice.length; i++) {
+      const x = destX + Math.floor((i / (Math.max(1, slice.length - 1))) * (destW - 1))
+      const v = Number(slice[i])
+      const t = (v - yMin) / (yMax - yMin)
+      const y = destY + Math.floor(destH - (t * (destH - 4) + 2))
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    }
+  } else {
+    const max = slice.length ? Math.max(...Array.from(slice, Math.abs)) : 1
+    const norm = max || 1
+    for (let i = 0; i < slice.length; i++) {
+      const x = destX + Math.floor((i / (Math.max(1, slice.length - 1))) * (destW - 1))
+      const v = slice[i] / norm
+      const y = destY + Math.floor(destH / 2 - v * (destH / 2 - 2))
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    }
+  }
+  ctx.stroke()
+  ctx.restore()
+}
+
 export default function EdfViewer() {
   const [data, setData] = useState(null)
   const [epochSeconds, setEpochSeconds] = useState(30)
@@ -305,35 +340,45 @@ export default function EdfViewer() {
     if (overrideIndex && typeof overrideIndex === 'object' && overrideIndex.target) overrideIndex = undefined
     const idx = (overrideIndex !== undefined && overrideIndex !== null) ? overrideIndex : epochIndex
     if (!data) return
-    // merge canvases vertically and scale to fixed output size 1080x1920
-    const widths = canvasesRef.current.map(c => c?.width || 0)
-    const heights = canvasesRef.current.map(c => c?.height || 0)
-    const origW = Math.max(...widths, 800)
-    const origH = Math.max(heights.reduce((a,b)=>a+b,0), 1)
-    const OUT_W = 1080
-    const OUT_H = 1920
+    // Programmatic high-resolution render (drawing from samples) at 1920x1080
+    const OUT_W = 1920
+    const OUT_H = 1080
     const out = document.createElement('canvas')
     out.width = OUT_W
     out.height = OUT_H
     const ctx = out.getContext('2d')
-    let y = 0
-    const scaleY = OUT_H / origH
-    const scaleX = OUT_W / origW
-    canvasesRef.current.forEach(c => {
-      if (!c) return
-      const srcW = c.width
-      const srcH = c.height
-      const destX = 0
-      const destY = Math.round(y * scaleY)
-      const destW = Math.round(srcW * scaleX)
-      const destH = Math.round(srcH * scaleY)
-      ctx.drawImage(c, 0, 0, srcW, srcH, destX, destY, destW, destH)
-      y += srcH
+    // compute total 'pixels' height from CHANNEL_ORDER (use provided pixel sizes)
+    const totalPixels = CHANNEL_ORDER.reduce((s, e) => s + (e[1] || 0), 0) || 1
+    // background
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, OUT_W, OUT_H)
+    let yAcc = 0
+    CHANNEL_ORDER.forEach((entry, rowIdx) => {
+      const name = entry[0]
+      const pixels = entry[1] || 0
+      const yRange = entry[2] || null
+      let ch = null
+      if (!name) {
+        ch = { name: '', samples: [], sampleRate: 100 }
+      } else {
+        let mappedIdx = data.channels.findIndex(c => c.name === name || (c.rawLabel && c.rawLabel.toUpperCase().includes('SPO2') && name.startsWith('Saturation')))
+        if ((mappedIdx == null || mappedIdx < 0) && name === 'Audio Volume') {
+          mappedIdx = data.channels.findIndex(c => c.name === 'Snore' || (c.rawLabel && /AUDIO|PTAFVOL|VOLUME/.test(c.rawLabel.toUpperCase())))
+        }
+        ch = (mappedIdx != null && mappedIdx >= 0) ? data.channels[mappedIdx] : (data.channels[rowIdx] || null)
+      }
+      if (!ch) { yAcc += pixels; return }
+      const sr = (ch.sampleRate || ch.sample_rate) || 100
+      const epochSamples = Math.max(1, Math.floor(sr * Math.max(1, epochSeconds)))
+      const epochStart = idx * epochSamples
+      const destY = Math.round((yAcc / totalPixels) * OUT_H)
+      const destH = Math.max(1, Math.round((pixels / totalPixels) * OUT_H))
+      const destW = OUT_W
+      drawWaveIntoCtx(ctx, 0, destY, destW, destH, ch.samples || [], sr, epochStart, epochSamples, yRange)
+      yAcc += pixels
     })
-    // get blob promise
     out.toBlob(async (blob) => {
       const filename = `edf_epoch_${idx + 1}.png`
-      // if user selected a directory and File System Access API available, write directly
       const dirHandle = dirHandleRef.current
       if (dirHandle && typeof dirHandle.getFileHandle === 'function') {
         try {
@@ -346,7 +391,6 @@ export default function EdfViewer() {
           console.warn('디렉터리에 저장 실패, 기본 다운로드로 폴백:', err)
         }
       }
-      // fallback: trigger download
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
