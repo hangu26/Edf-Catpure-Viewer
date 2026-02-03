@@ -23,9 +23,9 @@ function mapChannelName(label) {
   if (/\bSPO2\b/.test(s) || /SATUR/.test(s)) return 'Saturation'
   // Treat audio/volume channels as snore sensor
   if (/AUDIO|PTAFVOL|VOLUME/.test(s)) return 'Snore'
-  if (/X ?AXIS|ACCEL|ACCELEROMETER|XAXIS/.test(s)) return 'X Axis'
-  if (/Y ?AXIS|YAXIS/.test(s)) return 'Y Axis'
-  if (/Z ?AXIS|ZAXIS/.test(s)) return 'Z Axis'
+  if (/X ?AXIS|ACCEL|ACCELEROMETER|XAXIS/.test(s)) return 'Position'
+  if (/Y ?AXIS|YAXIS/.test(s)) return 'Position'
+  if (/Z ?AXIS|ZAXIS/.test(s)) return 'Position'
   // EEG specific channels mapping: try to detect C3/C4/O1/O2 etc
   if (/C3/.test(s) && /M2/.test(s)) return 'C3-M2'
   if (/C4/.test(s) && /M1/.test(s)) return 'C4-M1'
@@ -38,9 +38,9 @@ function mapChannelName(label) {
     if (cleaned.includes(k.replace(/[^A-Z0-9]/g, ''))) {
       // map back to display forms
       switch(k) {
-        case 'XAXIS': return 'X Axis'
-        case 'YAXIS': return 'Y Axis'
-        case 'ZAXIS': return 'Z Axis'
+        case 'XAXIS': return 'Position'
+        case 'YAXIS': return 'Position'
+        case 'ZAXIS': return 'Position'
         case 'C3-M2': return 'C3-M2'
         case 'C4-M1': return 'C4-M1'
         case 'O1-M2': return 'O1-M2'
@@ -65,9 +65,9 @@ function mapChannelName(label) {
   return label.trim()
 }
 const CHANNEL_ORDER = [
-  ['', 43],
-  ['', 43],
-  ['', 43],
+  ['Position', 43],
+  ['Position', 43],
+  ['Position', 43],
   ['C3-M2', 43],
   ['C4-M1', 43],
   ['O1-M2', 43],
@@ -168,6 +168,33 @@ export default function EdfViewer() {
   const canvasesRef = useRef([])
   const dirHandleRef = useRef(null)
   const [folderName, setFolderName] = useState('')
+  const [folderCaptureRunning, setFolderCaptureRunning] = useState(false)
+  const folderCaptureRef = useRef(false)
+  const [folderCaptureStatus, setFolderCaptureStatus] = useState('')
+  const [folderFilesTotal, setFolderFilesTotal] = useState(0)
+  const [folderFilesIndex, setFolderFilesIndex] = useState(0)
+  const [folderEpochIndex, setFolderEpochIndex] = useState(0)
+  const [folderEpochTotal, setFolderEpochTotal] = useState(0)
+  const [folderLogs, setFolderLogs] = useState([])
+
+  function pushFolderLog(msg) {
+    setFolderLogs(prev => [...prev, `${new Date().toLocaleTimeString()} ${msg}`].slice(-300))
+  }
+
+  const epochDebug = React.useMemo(() => {
+    if (!data) return null
+    const epochLenSec = Math.max(1, epochSeconds)
+    // pick a representative channel (first with samples)
+    const ch = (data.channels || []).find(c => c && c.samples && c.samples.length) || (data.channels && data.channels[0]) || null
+    if (!ch) return { startSec: epochIndex * epochLenSec, endSec: (epochIndex + 1) * epochLenSec, channel: null }
+    const sr = (ch.sampleRate || ch.sample_rate) || 100
+    const startSec = epochIndex * epochLenSec
+    const endSec = (epochIndex + 1) * epochLenSec
+    const startSample = Math.round(startSec * sr)
+    const epochSamples = Math.max(1, Math.round(sr * epochLenSec))
+    const endSample = startSample + epochSamples - 1
+    return { startSec, endSec, channel: ch.name || ch.rawLabel || 'channel0', sr, startSample, endSample }
+  }, [data, epochIndex, epochSeconds])
 
   const handleFile = async (e) => {
     const f = e.target.files[0]
@@ -276,8 +303,9 @@ export default function EdfViewer() {
         }
         if (!ch) return
         const sr = (ch.sampleRate || ch.sample_rate) || 100
-        const epochSamples = Math.max(1, Math.floor(sr * Math.max(1, epochSeconds)))
-        const epochStart = epochIndex * epochSamples
+        const epochLenSec = Math.max(1, epochSeconds)
+        const epochSamples = Math.max(1, Math.round(sr * epochLenSec))
+        const epochStart = Math.round(epochIndex * epochLenSec * sr)
         const canvas = canvasesRef.current[rowIdx]
         if (!canvas) return
         drawWave(canvas, ch.samples || [], sr, epochStart, epochSamples, yRange)
@@ -347,8 +375,9 @@ export default function EdfViewer() {
     out.width = OUT_W
     out.height = OUT_H
     const ctx = out.getContext('2d')
-    // compute total 'pixels' height from CHANNEL_ORDER (use provided pixel sizes)
-    const totalPixels = CHANNEL_ORDER.reduce((s, e) => s + (e[1] || 0), 0) || 1
+    // compute uniform row height (ignore per-channel pixel sizes)
+    const rows = Math.max(1, CHANNEL_ORDER.length)
+    const rowHeight = Math.max(1, Math.floor(OUT_H / rows))
     // background
     ctx.fillStyle = '#000'
     ctx.fillRect(0, 0, OUT_W, OUT_H)
@@ -367,15 +396,17 @@ export default function EdfViewer() {
         }
         ch = (mappedIdx != null && mappedIdx >= 0) ? data.channels[mappedIdx] : (data.channels[rowIdx] || null)
       }
-      if (!ch) { yAcc += pixels; return }
+      if (!ch) { return }
       const sr = (ch.sampleRate || ch.sample_rate) || 100
-      const epochSamples = Math.max(1, Math.floor(sr * Math.max(1, epochSeconds)))
-      const epochStart = idx * epochSamples
-      const destY = Math.round((yAcc / totalPixels) * OUT_H)
-      const destH = Math.max(1, Math.round((pixels / totalPixels) * OUT_H))
+      const epochLenSec = Math.max(1, epochSeconds)
+      const epochSamples = Math.max(1, Math.round(sr * epochLenSec))
+      const epochStart = Math.round(idx * epochLenSec * sr)
+      const destY = rowIdx * rowHeight
+      // for last row include remainder to fill OUT_H exactly
+      const destH = (rowIdx === rows - 1) ? (OUT_H - destY) : rowHeight
       const destW = OUT_W
       drawWaveIntoCtx(ctx, 0, destY, destW, destH, ch.samples || [], sr, epochStart, epochSamples, yRange)
-      yAcc += pixels
+      // no yAcc when using uniform rows
     })
     out.toBlob(async (blob) => {
       const filename = `edf_epoch_${idx + 1}.png`
@@ -414,6 +445,212 @@ export default function EdfViewer() {
     }
   }
 
+  // --- EDF/JSON 파일 파싱 헬퍼 ---
+  async function parseEdfOrJsonFile(file) {
+    try {
+      if (!file) throw new Error('no file')
+      if (file.name.toLowerCase().endsWith('.json')) {
+        const txt = await file.text()
+        return JSON.parse(txt)
+      }
+      if (typeof edfjs.EDF === 'function') {
+        const edf = new edfjs.EDF()
+        await edf.from_file(file)
+        const channels = edf.channels.map((ch) => ({
+          name: mapChannelName(ch.label || ch.channel || ch.name || ''),
+          rawLabel: ch.label || ch.channel || ch.name || '',
+          samples: ch.blob || ch.samples || ch.data || [],
+          sampleRate: ch.sampling_rate || ch.samplingRate || edf.sampling_rate?.[ch.label] || 100
+        }))
+        return { channels, epochSeconds }
+      }
+      const arrayBuffer = await file.arrayBuffer()
+      let parsed
+      if (typeof edfjs.readEdf === 'function') parsed = edfjs.readEdf(arrayBuffer)
+      else if (typeof edfjs.default === 'function') parsed = edfjs.default(arrayBuffer)
+      else if (edfjs.default && typeof edfjs.default.readEdf === 'function') parsed = edfjs.default.readEdf(arrayBuffer)
+      else if (typeof edfjs.parse === 'function') parsed = edfjs.parse(arrayBuffer)
+      else throw new Error('edfjs: compatible parser export not found')
+      const rawSignals = parsed.signals || parsed.channels || parsed.records || []
+      const channels = rawSignals.map((s) => ({
+        name: mapChannelName(s.label || s.name || s.channel || ''),
+        rawLabel: s.label || s.name || s.channel || '',
+        samples: s.samples || s.data || s.samplesArray || [],
+        sampleRate: s.sample_rate || s.sampleRate || s.samplingRate || parsed.sample_rate || 100
+      }))
+      return { channels, epochSeconds }
+    } catch (err) {
+      console.error('parseEdfOrJsonFile error', err)
+      throw err
+    }
+  }
+
+  // --- 단일 에폭 이미지 생성 및 저장 헬퍼 ---
+  async function generateAndSaveEpochImage(dataObj, idx, outDirHandle, outNamePrefix = 'edf_epoch') {
+    const OUT_W = 1920
+    const OUT_H = 1080
+    const out = document.createElement('canvas')
+    out.width = OUT_W
+    out.height = OUT_H
+    const ctx = out.getContext('2d')
+    const rows = Math.max(1, CHANNEL_ORDER.length)
+    const rowHeight = Math.max(1, Math.floor(OUT_H / rows))
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, OUT_W, OUT_H)
+    let yAcc = 0
+    CHANNEL_ORDER.forEach((entry, rowIdx) => {
+      const name = entry[0]
+      const pixels = entry[1] || 0
+      const yRange = entry[2] || null
+      let ch = null
+      if (!name) {
+        ch = { name: '', samples: [], sampleRate: 100 }
+      } else {
+        let mappedIdx = (dataObj.channels || []).findIndex(c => c.name === name || (c.rawLabel && c.rawLabel.toUpperCase().includes('SPO2') && name.startsWith('Saturation')))
+        if ((mappedIdx == null || mappedIdx < 0) && name === 'Audio Volume') {
+          mappedIdx = (dataObj.channels || []).findIndex(c => c.name === 'Snore' || (c.rawLabel && /AUDIO|PTAFVOL|VOLUME/.test(c.rawLabel.toUpperCase())))
+        }
+        ch = (mappedIdx != null && mappedIdx >= 0) ? dataObj.channels[mappedIdx] : (dataObj.channels[rowIdx] || null)
+      }
+      if (!ch) { return }
+      const sr = (ch.sampleRate || ch.sample_rate) || 100
+      const epochLenSec = Math.max(1, dataObj.epochSeconds || epochSeconds)
+      const epochSamples = Math.max(1, Math.round(sr * epochLenSec))
+      const epochStart = Math.round(idx * epochLenSec * sr)
+      const destY = rowIdx * rowHeight
+      const destH = (rowIdx === rows - 1) ? (OUT_H - destY) : rowHeight
+      const destW = OUT_W
+      drawWaveIntoCtx(ctx, 0, destY, destW, destH, ch.samples || [], sr, epochStart, epochSamples, yRange)
+      // uniform rows — no yAcc
+    })
+    return new Promise(async (resolve, reject) => {
+      out.toBlob(async (blob) => {
+        const filename = `${outNamePrefix}_${idx + 1}.png`
+        if (outDirHandle && typeof outDirHandle.getFileHandle === 'function') {
+          try {
+            const fh = await outDirHandle.getFileHandle(filename, { create: true })
+            const writable = await fh.createWritable()
+            await writable.write(blob)
+            await writable.close()
+            resolve()
+            return
+          } catch (err) {
+            console.warn('디렉터리 저장 실패, 기본 다운로드로 폴백:', err)
+          }
+        }
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        a.click()
+        URL.revokeObjectURL(url)
+        resolve()
+      }, 'image/png')
+    })
+  }
+
+  // --- 데이터 객체의 모든 에폭을 순차 저장 ---
+  async function captureAllEpochsForData(dataObj, outDirHandle, filePrefix = 'edf_epoch') {
+    if (!dataObj || !dataObj.channels) return
+    const per = CHANNEL_ORDER.map(([_name, _pixels], rowIdx) => {
+      if (!_name) return 0
+      const ch = dataObj.channels.find(c => c.name === _name) || dataObj.channels[rowIdx]
+      const sr = (ch && (ch.sampleRate || ch.sample_rate)) || 100
+      const epochSamples = Math.max(1, Math.floor(sr * Math.max(1, dataObj.epochSeconds || epochSeconds)))
+      return Math.ceil((ch && ch.samples ? ch.samples.length : 0) / epochSamples)
+    })
+    const total = Math.max(...per, 0)
+    for (let i = 0; i < total; i++) {
+      await generateAndSaveEpochImage(dataObj, i, outDirHandle, filePrefix)
+      await new Promise(r => setTimeout(r, Math.max(50, autoDelay || 100)))
+    }
+  }
+
+  // --- 선택한 폴더 내 모든 .edf/.json 파일을 순차 처리하여 서브폴더에 저장 ---
+  const stopFolderAutoCapture = () => {
+    folderCaptureRef.current = false
+    setFolderCaptureRunning(false)
+    setFolderCaptureStatus('Stopped by user')
+    pushFolderLog('Folder capture stopped by user')
+  }
+
+  const startFolderAutoCapture = async () => {
+    const topDir = dirHandleRef.current
+    if (!topDir) { alert('먼저 폴더를 선택하세요.'); return }
+    folderCaptureRef.current = true
+    setFolderCaptureRunning(true)
+    setFolderLogs([])
+    setFolderCaptureStatus('Starting')
+    pushFolderLog('Starting folder capture')
+    try {
+      const files = []
+      for await (const [name, handle] of topDir.entries()) {
+        if (handle.kind !== 'file') continue
+        const lname = name.toLowerCase()
+        // include only EDF files
+        if (lname.endsWith('.edf')) files.push({ name, handle })
+      }
+      files.sort((a, b) => {
+        const na = a.name.replace(/\.[^/.]+$/, '')
+        const nb = b.name.replace(/\.[^/.]+$/, '')
+        const ia = parseInt(na, 10)
+        const ib = parseInt(nb, 10)
+        if (!Number.isNaN(ia) && !Number.isNaN(ib)) return ia - ib
+        return a.name.localeCompare(b.name)
+      })
+      setFolderFilesTotal(files.length)
+      for (let i = 0; i < files.length; i++) {
+        if (!folderCaptureRef.current) break
+        const { name, handle } = files[i]
+        setFolderFilesIndex(i + 1)
+        setFolderCaptureStatus(`Processing ${name} (${i + 1}/${files.length})`)
+        pushFolderLog(`Processing file: ${name}`)
+        try {
+          const file = await handle.getFile()
+          const dataObj = await parseEdfOrJsonFile(file)
+          dataObj.epochSeconds = dataObj.epochSeconds || epochSeconds
+          // compute total epochs for this dataObj
+          const per = CHANNEL_ORDER.map(([_name, _pixels], rowIdx) => {
+            if (!_name) return 0
+            const ch = dataObj.channels.find(c => c.name === _name) || dataObj.channels[rowIdx]
+            const sr = (ch && (ch.sampleRate || ch.sample_rate)) || 100
+            const epochSamples = Math.max(1, Math.floor(sr * Math.max(1, dataObj.epochSeconds || epochSeconds)))
+            return Math.ceil((ch && ch.samples ? ch.samples.length : 0) / epochSamples)
+          })
+          const totalEpochsForFile = Math.max(...per, 0)
+          setFolderEpochTotal(totalEpochsForFile)
+          const base = name.replace(/\.[^/.]+$/, '')
+          const subdir = await topDir.getDirectoryHandle(base, { create: true })
+          for (let e = 0; e < totalEpochsForFile; e++) {
+            if (!folderCaptureRef.current) break
+            setFolderEpochIndex(e + 1)
+            setFolderCaptureStatus(`File ${base}: epoch ${e + 1}/${totalEpochsForFile}`)
+            pushFolderLog(`Rendering ${base} epoch ${e + 1}/${totalEpochsForFile}`)
+            await generateAndSaveEpochImage(dataObj, e, subdir, base)
+            await new Promise(r => setTimeout(r, Math.max(50, autoDelay || 100)))
+          }
+          pushFolderLog(`Finished file: ${name}`)
+        } catch (err) {
+          console.warn('파일 처리 실패:', name, err)
+          pushFolderLog(`Error processing ${name}: ${err && err.message ? err.message : err}`)
+        }
+        await new Promise(r => setTimeout(r, 200))
+      }
+      if (folderCaptureRef.current) {
+        setFolderCaptureStatus('Completed')
+        pushFolderLog('Folder capture completed')
+      }
+    } catch (err) {
+      console.error('startFolderAutoCapture error', err)
+      setFolderCaptureStatus('Error')
+      pushFolderLog(`Folder capture error: ${err && err.message ? err.message : err}`)
+      alert('폴더 자동 캡처 중 오류가 발생했습니다.')
+    } finally {
+      folderCaptureRef.current = false
+      setFolderCaptureRunning(false)
+    }
+  }
+
   React.useEffect(() => {
     renderEpoch()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -422,7 +659,7 @@ export default function EdfViewer() {
   return (
     <div className="edf-viewer">
       <div style={{marginBottom:12}}>
-        <input type="file" accept=".edf,.json" onChange={handleFile} />
+        <input type="file" accept=".edf" onChange={handleFile} />
         <label style={{marginLeft:8}}>Epoch seconds:</label>
         <input style={{width:60}} type="number" value={epochSeconds} onChange={e=>setEpochSeconds(Number(e.target.value))} />
         <button onClick={handlePrev} style={{marginLeft:8}}>Prev Epoch</button>
@@ -448,7 +685,29 @@ export default function EdfViewer() {
         <label style={{marginLeft:8}}>Delay(ms):</label>
         <input style={{width:80, marginLeft:4}} type="number" value={autoDelay} onChange={e=>setAutoDelay(Math.max(100, Number(e.target.value)||100))} />
         <button onClick={chooseFolder} style={{marginLeft:8}}>Set Folder</button>
+        {folderCaptureRunning ? (
+          <button onClick={stopFolderAutoCapture} style={{marginLeft:8}}>Stop Folder Capture</button>
+        ) : (
+          <button onClick={startFolderAutoCapture} style={{marginLeft:8}}>Folder Auto Capture</button>
+        )}
         <div style={{display:'inline-block', marginLeft:8}}>{folderName ? `Folder: ${folderName}` : ''}</div>
+      </div>
+
+      <div style={{marginTop:8}}>
+        <div><strong>Status:</strong> {folderCaptureStatus}</div>
+        {epochDebug && (
+          <div style={{marginTop:6}}>
+            <div><strong>Epoch range:</strong> {epochDebug.startSec}s — {epochDebug.endSec}s</div>
+          </div>
+        )}
+        {folderFilesTotal > 0 && (
+          <div>Files: {folderFilesIndex}/{folderFilesTotal} — Epoch: {folderEpochIndex}/{folderEpochTotal}</div>
+        )}
+        {folderLogs.length > 0 && (
+          <pre style={{height:120, overflow:'auto', background:'#111', color:'#ddd', padding:8}}>
+            {folderLogs.join('\n')}
+          </pre>
+        )}
       </div>
 
       {!data && <div>EDF 파일(.edf)을 업로드하세요.</div>}
@@ -467,7 +726,7 @@ export default function EdfViewer() {
                   <canvas
                     ref={el => { canvasesRef.current[rowIdx] = el }}
                     width={1080}
-                    height={pixels}
+                    height={40}
                     style={{border:'1px solid #333', background:'#111'}}
                   />
                 </div>
